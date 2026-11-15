@@ -3,11 +3,14 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "motion_ble.h"
 #include "paw3395.h"
 #include "raw_web.h"
+#include "sd_logger.h"
 
 static const char *TAG = "paw3395_test";
 
@@ -64,6 +67,38 @@ void app_main(void)
     ESP_ERROR_CHECK(paw3395_power_up(&sensor));
     ESP_ERROR_CHECK(raw_web_start(&sensor));
     wait_forever();
+#elif CONFIG_PAW3395_TEST_PHASE_LOGGER
+    ESP_LOGI(TAG, "SPI probe passed; starting microSD + BLE motion logger.");
+    ESP_ERROR_CHECK(paw3395_power_up(&sensor));
+
+    sd_logger_t logger;
+    sd_logger_init(&logger);
+    esp_err_t err = sd_logger_start(&logger);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "microSD unavailable (%s); BLE monitoring continues and SD mounting will retry",
+                 esp_err_to_name(err));
+    }
+
+    err = motion_ble_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "BLE did not start: %s; microSD logging continues", esp_err_to_name(err));
+    }
+
+    ESP_LOGI(TAG, "Logger samples: elapsed_ms,delta_x,delta_y,squal,motion");
+    for (;;) {
+        paw3395_motion_t sample;
+        const uint64_t elapsed_us = (uint64_t)esp_timer_get_time();
+        const uint32_t elapsed_ms = (uint32_t)(elapsed_us / 1000U);
+
+        err = paw3395_read_motion(&sensor, &sample);
+        if (err == ESP_OK) {
+            sd_logger_record(&logger, elapsed_ms, elapsed_us, &sample);
+            motion_ble_publish(elapsed_ms, &sample);
+        } else {
+            ESP_LOGE(TAG, "sample read failed: %s", esp_err_to_name(err));
+        }
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_PAW3395_SAMPLE_PERIOD_MS));
+    }
 #else
 #error "Select a PAW3395 test phase in menuconfig"
 #endif

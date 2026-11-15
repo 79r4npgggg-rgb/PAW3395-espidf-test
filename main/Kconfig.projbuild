@@ -16,15 +16,24 @@ config PAW3395_TEST_PHASE_FULL_INIT
 config PAW3395_TEST_PHASE_RAW_WEB
     bool "3 - RAW image web viewer (Wi-Fi access point)"
 
+config PAW3395_TEST_PHASE_LOGGER
+    bool "4 - Motion logger (microSD CSV + BLE notifications)"
+    help
+        Performs the full PAW3395 initialization, appends motion samples to a
+        FAT-formatted microSD card when present, and advertises a BLE GATT
+        service for live Delta_X, Delta_Y, and SQUAL monitoring.  It does not
+        start the Wi-Fi RAW viewer.
+
 endchoice
 
 config PAW3395_SAMPLE_PERIOD_MS
     int "Plot sample interval (ms)"
-    depends on PAW3395_TEST_PHASE_FULL_INIT
+    depends on PAW3395_TEST_PHASE_FULL_INIT || PAW3395_TEST_PHASE_LOGGER
     range 1 1000
     default 20
     help
-        Interval between the comma-separated SQUAL,Delta_X,Delta_Y samples.
+        Interval between motion samples.  In phase 2 this controls numeric
+        UART output; in phase 4 it controls microSD rows and BLE notifications.
 
 config PAW3395_RAW_WEB_AP_PASSWORD
     string "RAW web viewer Wi-Fi password"
@@ -32,5 +41,41 @@ config PAW3395_RAW_WEB_AP_PASSWORD
     help
         WPA2 password for the PAW3395-RAW access point. It must contain at
         least eight characters.
+
+config PAW3395_SD_CS_GPIO
+    int "microSD SPI chip-select GPIO"
+    depends on PAW3395_TEST_PHASE_LOGGER
+    range 0 48
+    default 3
+    help
+        XIAO ESP32-S3 D2 / GPIO3 by default.  The microSD card shares the
+        PAW3395 SPI clock (GPIO7), MOSI (GPIO9), and MISO (GPIO8), but must
+        have its own CS line.  Do not select GPIO1, GPIO2, GPIO7, GPIO8, or
+        GPIO9 because those pins are already used by the PAW3395.
+
+config PAW3395_SD_FLUSH_PERIOD_MS
+    int "microSD CSV flush interval (ms)"
+    depends on PAW3395_TEST_PHASE_LOGGER
+    range 100 60000
+    default 1000
+    help
+        Rows are buffered and flushed at this interval.  A shorter interval
+        reduces data lost on sudden power removal at the cost of more writes.
+
+config PAW3395_SD_RETRY_PERIOD_MS
+    int "microSD remount retry interval (ms)"
+    depends on PAW3395_TEST_PHASE_LOGGER
+    range 1000 60000
+    default 5000
+    help
+        If no card is present or an SD write fails, continue BLE operation and
+        retry mounting at this interval.
+
+config PAW3395_BLE_DEVICE_NAME
+    string "BLE advertised device name"
+    depends on PAW3395_TEST_PHASE_LOGGER
+    default "PAW3395-Logger"
+    help
+        Name shown by nRF Connect while the logger is advertising.
 
 endmenu

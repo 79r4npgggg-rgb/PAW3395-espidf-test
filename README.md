@@ -71,9 +71,109 @@ This mode turns the XIAO into a local Wi-Fi access point and shows one still RAW
 
 The browser page scales the 36 x 36, 7-bit PAW3395 frame without smoothing. Use `Capture` only when the sensor is still. Bright, structured texture indicates that the lens, illumination, and sensor are seeing the surface; a mostly black or uniform image is a useful indication that focus, alignment, or illumination needs attention.
 
+## 4. Log motion to microSD and monitor it over BLE
+
+This is a separate **Phase 4**. It runs the ordinary PAW3395 motion-read path
+from Phase 2, then records every sample to a FAT-formatted microSD card and
+sends the same current sample over BLE. It does not enable the Wi-Fi RAW
+viewer, so Phase 3 stays independent.
+
+In idf.py menuconfig, select:
+
+~~~text
+PAW3395 test firmware
+  -> Test phase
+  -> 4 - Motion logger (microSD CSV + BLE notifications)
+~~~
+
+The default sample interval is 20 ms. The same menu has settings for the SD
+flush interval, SD mount retry interval, CS pin, and advertised BLE name.
+
+### microSD wiring
+
+The card and PAW3395 deliberately share one SPI bus. Each device has a unique
+chip-select line, so the ESP-IDF SPI driver selects only one device for each
+transaction.
+
+| microSD SPI signal | XIAO ESP32-S3 | Shared with / reason |
+| --- | --- | --- |
+| SCK / CLK | GPIO7 / D8 | Shared PAW3395 SCLK |
+| MOSI / DI | GPIO9 / D10 | Shared PAW3395 MOSI |
+| MISO / DO | GPIO8 / D9 | Shared PAW3395 MISO |
+| CS | **GPIO3 / D2** | Dedicated to microSD; PAW3395 keeps GPIO1 / D0 for NCS |
+| VCC | 3V3 | Use a 3.3 V-logic microSD breakout |
+| GND | GND | Must be common with XIAO and PAW3395 |
+
+GPIO3 is the default and has been checked against the existing PAW3395 pins
+(GPIO1, 2, 7, 8, and 9). The firmware rejects a configured SD CS that conflicts
+with any of those pins. Do not use a 5 V SPI output level on any XIAO pin.
+The SD adapter's MISO output must release the bus when its CS is high; use a
+proper SPI microSD adapter with the normal pull-ups. This is especially
+important because PAW3395 and the card share MISO.
+
+The card is mounted at /sdcard without formatting. Use a FAT32-formatted
+card. The logger appends to /sdcard/paw3395.csv, writing the header only if
+the file is empty:
+
+~~~csv
+elapsed_ms,elapsed_us,delta_x,delta_y,squal,motion
+60342,60342017,-18,6,57,128
+~~~
+
+Both time columns are monotonic time since the firmware boot, not wall-clock
+UTC: elapsed_us is the precise timestamp and elapsed_ms is convenient for
+plotting. The board has no RTC or time source in this mode, so do not interpret
+them as calendar time. Rows are buffered and flushed once per second by
+default. If the card is absent at boot, fails to mount, or is removed, motion
+sampling and BLE continue; the firmware logs the failure on UART and retries
+the mount every five seconds. A clean card removal is still preferred to avoid
+losing the last buffered second of rows.
+
+### BLE GATT contract and nRF Connect
+
+The device advertises as PAW3395-Logger by default. Its custom 128-bit
+primary service and characteristic are:
+
+| Item | UUID | Properties |
+| --- | --- | --- |
+| Motion logger service | 8f3c0001-8c18-4f6f-a69c-0c3a1df3e001 | Primary service |
+| Current motion | 8f3c0002-8c18-4f6f-a69c-0c3a1df3e001 | Read, Notify |
+
+Every read and notification is a fixed 10-byte, little-endian packet. It fits
+within the default BLE notification payload, so monitoring does not depend on
+an MTU change.
+
+| Byte offset | Type | Meaning |
+| --- | --- | --- |
+| 0–3 | uint32_le | elapsed_ms since this boot |
+| 4–5 | int16_le | delta_x |
+| 6–7 | int16_le | delta_y |
+| 8 | uint8 | squal |
+| 9 | uint8 | PAW3395 Motion register, bit 7 indicates motion |
+
+To monitor on iPhone with **nRF Connect**:
+
+1. Flash Phase 4 and open the Scanner tab. Find PAW3395-Logger and tap
+   **Connect**.
+2. After service discovery, open
+   8f3c0001-8c18-4f6f-a69c-0c3a1df3e001.
+3. On 8f3c0002-8c18-4f6f-a69c-0c3a1df3e001, tap the notification bell
+   (**Notify**). nRF Connect writes the CCCD; the UART log confirms
+   "motion notifications enabled".
+4. Notifications now arrive at the configured sample interval. Leave the
+   display in hex and decode the fields as little-endian using the table
+   above; a read returns the latest packet as a quick connection check.
+
+BLE is intentionally optional from the logger's point of view: a disconnect
+only stops radio notifications. PAW3395 sampling and SD CSV recording continue
+unchanged while there is no central connection.
+
 ## Design notes
 
 - SPI is Mode 0 at 1 MHz. PAW3395 samples MOSI on rising SCLK edges and presents MISO after falling edges.
+- In Phase 4, the microSD card is added as a second SPI2 device. The SPI driver
+  applies each device's speed and CS independently; PAW3395's manually timed
+  NCS sequence remains unchanged.
 - Reads keep NCS low across the PAW3395-required 2 us address-to-data delay. Auto-CS transactions alone would not meet that requirement.
 - The 137-write power-up table, its 1 ms/60-attempt readiness polling, fallback, and final bank writes are transcribed from PAW3395DM-T6QU datasheet v0.8 section 6.2.
 - The project disables rest mode after initialization (`Performance=0x80`) because the datasheet specifies that SQUAL is valid in run mode only.
