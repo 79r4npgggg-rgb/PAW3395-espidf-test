@@ -17,6 +17,8 @@
  * elapsed_ms (uint32), delta_x (int16), delta_y (int16), squal (uint8), and
  * motion (uint8). Delta X and Delta Y values are separate 2-byte int16
  * little-endian values; SQUAL is a separate 1-byte uint8 value.
+ * Graph Delta X:         8f3c0006-8c18-4f6f-a69c-0c3a1df3e001 (READ, NOTIFY)
+ * Graph Delta Y:         8f3c0007-8c18-4f6f-a69c-0c3a1df3e001 (READ, NOTIFY)
  */
 esp_err_t motion_ble_start(void);
 

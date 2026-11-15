@@ -41,6 +41,15 @@ static const ble_uuid128_t s_squal_uuid =
     BLE_UUID128_INIT(0x01, 0xe0, 0xf3, 0x1d, 0x3a, 0x0c, 0x9c, 0xa6,
                      0x6f, 0x4f, 0x18, 0x8c, 0x05, 0x00, 0x3c, 0x8f);
 
+/* Graph-friendly unsigned Delta X / Delta Y */
+static const ble_uuid128_t s_graph_delta_x_uuid =
+    BLE_UUID128_INIT(0x01, 0xe0, 0xf3, 0x1d, 0x3a, 0x0c, 0x9c, 0xa6,
+                     0x6f, 0x4f, 0x18, 0x8c, 0x06, 0x00, 0x3c, 0x8f);
+
+static const ble_uuid128_t s_graph_delta_y_uuid =
+    BLE_UUID128_INIT(0x01, 0xe0, 0xf3, 0x1d, 0x3a, 0x0c, 0x9c, 0xa6,
+                     0x6f, 0x4f, 0x18, 0x8c, 0x07, 0x00, 0x3c, 0x8f);
+
 typedef struct __attribute__((packed)) {
     uint32_t elapsed_ms;
     int16_t delta_x;
@@ -58,6 +67,12 @@ static uint16_t s_delta_x_value_handle;
 static uint16_t s_delta_y_value_handle;
 static uint16_t s_squal_value_handle;
 static uint16_t s_connection_handle = BLE_HS_CONN_HANDLE_NONE;
+
+static uint16_t s_graph_delta_x_value_handle;
+static uint16_t s_graph_delta_y_value_handle;
+static bool s_graph_delta_x_notifications_enabled;
+static bool s_graph_delta_y_notifications_enabled;
+
 static bool s_motion_notifications_enabled;
 static bool s_delta_x_notifications_enabled;
 static bool s_delta_y_notifications_enabled;
@@ -88,6 +103,12 @@ static void motion_ble_encode_int16_le(int16_t value, uint8_t encoded[2])
     encoded[1] = (uint8_t)(unsigned_value >> 8);
 }
 
+static void motion_ble_encode_uint16_le(uint16_t value, uint8_t encoded[2])
+{
+    encoded[0] = (uint8_t)value;
+    encoded[1] = (uint8_t)(value >> 8);
+}
+
 static int motion_access(uint16_t conn_handle, uint16_t attr_handle,
                          struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -115,6 +136,21 @@ static int motion_access(uint16_t conn_handle, uint16_t attr_handle,
             0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
 
+    if (attr_handle == s_graph_delta_x_value_handle ||
+    attr_handle == s_graph_delta_y_value_handle) {
+
+    const int16_t delta = attr_handle == s_graph_delta_x_value_handle ?
+        snapshot.delta_x : snapshot.delta_y;
+
+    const uint16_t graph_value = (uint16_t)((int32_t)delta + 32768);
+
+    uint8_t encoded[2];
+    motion_ble_encode_uint16_le(graph_value, encoded);
+
+    return os_mbuf_append(ctxt->om, encoded, sizeof(encoded)) == 0 ?
+        0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    
     if (attr_handle == s_squal_value_handle) {
         return os_mbuf_append(ctxt->om, &snapshot.squal, sizeof(snapshot.squal)) == 0 ?
             0 : BLE_ATT_ERR_INSUFFICIENT_RES;
@@ -151,6 +187,18 @@ static const struct ble_gatt_svc_def s_gatt_services[] = {
                 .access_cb = motion_access,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &s_squal_value_handle,
+            },
+            {
+                .uuid = &s_graph_delta_x_uuid.u,
+                .access_cb = motion_access,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &s_graph_delta_x_value_handle,
+            },
+            {
+                .uuid = &s_graph_delta_y_uuid.u,
+                .access_cb = motion_access,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &s_graph_delta_y_value_handle,
             },
             {0},
         },
@@ -197,6 +245,15 @@ static int motion_gap_event(struct ble_gap_event *event, void *arg)
             s_squal_notifications_enabled = event->subscribe.cur_notify;
             ESP_LOGI(TAG, "SQUAL notifications %s",
                      s_squal_notifications_enabled ? "enabled" : "disabled");
+        } else if (event->subscribe.attr_handle == s_graph_delta_x_value_handle) {
+            s_graph_delta_x_notifications_enabled = event->subscribe.cur_notify;
+            ESP_LOGI(TAG, "graph delta X notifications %s",
+                     s_graph_delta_x_notifications_enabled ? "enabled" : "disabled");
+
+        } else if (event->subscribe.attr_handle == s_graph_delta_y_value_handle) {
+            s_graph_delta_y_notifications_enabled = event->subscribe.cur_notify;
+            ESP_LOGI(TAG, "graph delta Y notifications %s",
+                     s_graph_delta_y_notifications_enabled ? "enabled" : "disabled");
         }
         return 0;
 
@@ -382,5 +439,27 @@ void motion_ble_publish(uint32_t elapsed_ms, const paw3395_motion_t *sample)
     if (s_squal_notifications_enabled) {
         motion_ble_notify(s_squal_value_handle, &packet.squal, sizeof(packet.squal),
                           "SQUAL");
+    }
+
+    if (s_graph_delta_x_notifications_enabled) {
+        const uint16_t graph_value =
+            (uint16_t)((int32_t)packet.delta_x + 32768);
+
+        uint8_t encoded[2];
+        motion_ble_encode_uint16_le(graph_value, encoded);
+
+        motion_ble_notify(s_graph_delta_x_value_handle, encoded,
+                      sizeof(encoded), "graph delta X");
+    }
+
+    if (s_graph_delta_y_notifications_enabled) {
+        const uint16_t graph_value =
+            (uint16_t)((int32_t)packet.delta_y + 32768);
+
+        uint8_t encoded[2];
+        motion_ble_encode_uint16_le(graph_value, encoded);
+
+        motion_ble_notify(s_graph_delta_y_value_handle, encoded,
+                      sizeof(encoded), "graph delta Y");
     }
 }
