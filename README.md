@@ -131,17 +131,22 @@ losing the last buffered second of rows.
 
 ### BLE GATT contract and nRF Connect
 
-The device advertises as PAW3395-Logger by default. Its custom 128-bit
-primary service and characteristic are:
+The device advertises as PAW3395-Logger by default. Its custom 128-bit primary
+service contains the original combined packet plus individual values. Each
+characteristic is independently readable and subscribable for notifications:
 
 | Item | UUID | Properties |
 | --- | --- | --- |
 | Motion logger service | 8f3c0001-8c18-4f6f-a69c-0c3a1df3e001 | Primary service |
-| Current motion | 8f3c0002-8c18-4f6f-a69c-0c3a1df3e001 | Read, Notify |
+| Current motion (existing) | 8f3c0002-8c18-4f6f-a69c-0c3a1df3e001 | Read, Notify; 10-byte packet |
+| Delta X | 8f3c0003-8c18-4f6f-a69c-0c3a1df3e001 | Read, Notify; int16_le (2 bytes) |
+| Delta Y | 8f3c0004-8c18-4f6f-a69c-0c3a1df3e001 | Read, Notify; int16_le (2 bytes) |
+| SQUAL | 8f3c0005-8c18-4f6f-a69c-0c3a1df3e001 | Read, Notify; uint8 (1 byte) |
 
-Every read and notification is a fixed 10-byte, little-endian packet. It fits
-within the default BLE notification payload, so monitoring does not depend on
-an MTU change.
+The existing Current motion characteristic is unchanged: every read and
+notification is a fixed 10-byte, little-endian packet. It fits within the
+default BLE notification payload, so monitoring does not depend on an MTU
+change.
 
 | Byte offset | Type | Meaning |
 | --- | --- | --- |
@@ -163,6 +168,15 @@ To monitor on iPhone with **nRF Connect**:
 4. Notifications now arrive at the configured sample interval. Leave the
    display in hex and decode the fields as little-endian using the table
    above; a read returns the latest packet as a quick connection check.
+5. To graph values independently, enable **Notify** on any combination of the
+   Delta X, Delta Y, and SQUAL characteristics. Delta X and Delta Y are signed
+   16-bit little-endian values; SQUAL is an unsigned 8-bit value. Enabling or
+   disabling one characteristic does not affect the others or the existing
+   10-byte Current motion notification.
+
+All four notifications are produced from the same PAW3395 sample. They are
+sent as separate BLE notifications, so their receive timestamps at the central
+can differ slightly.
 
 BLE is intentionally optional from the logger's point of view: a disconnect
 only stops radio notifications. PAW3395 sampling and SD CSV recording continue
