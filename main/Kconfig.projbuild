@@ -1,0 +1,36 @@
+menu "PAW3395 test firmware"
+
+choice PAW3395_TEST_PHASE
+    prompt "Test phase"
+    default PAW3395_TEST_PHASE_SPI_PROBE
+    help
+        Begin with the SPI probe.  It performs no sensor register writes and
+        verifies the Product_ID and inverse Product_ID values only.
+
+config PAW3395_TEST_PHASE_SPI_PROBE
+    bool "1 - SPI product-ID probe only (recommended first flash)"
+
+config PAW3395_TEST_PHASE_FULL_INIT
+    bool "2 - Full datasheet initialization and numeric plot output"
+
+config PAW3395_TEST_PHASE_RAW_WEB
+    bool "3 - RAW image web viewer (Wi-Fi access point)"
+
+endchoice
+
+config PAW3395_SAMPLE_PERIOD_MS
+    int "Plot sample interval (ms)"
+    depends on PAW3395_TEST_PHASE_FULL_INIT
+    range 1 1000
+    default 20
+    help
+        Interval between the comma-separated SQUAL,Delta_X,Delta_Y samples.
+
+config PAW3395_RAW_WEB_AP_PASSWORD
+    string "RAW web viewer Wi-Fi password"
+    default "paw3395raw"
+    help
+        WPA2 password for the PAW3395-RAW access point. It must contain at
+        least eight characters.
+
+endmenu

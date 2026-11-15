@@ -1,0 +1,11 @@
+# ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,8 @@
+{
+    "idf.currentSetup": "/Users/m-swm/.espressif/v6.0.2/esp-idf",
+    "idf.customExtraVars": {
+        "IDF_TARGET": "esp32s3"
+    },
+    "idf.flashType": "UART",
+    "idf.port": "/dev/tty.usbmodem1101"
+}
