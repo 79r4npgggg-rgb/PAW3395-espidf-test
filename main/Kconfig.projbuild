@@ -24,6 +24,15 @@ config PAW3395_TEST_PHASE_LOGGER
         service for live Delta_X, Delta_Y, and SQUAL monitoring.  It does not
         start the Wi-Fi RAW viewer.
 
+config PAW3395_TEST_PHASE_WIFI_MONITOR
+    bool "5 - Wireless real-time monitor (Wi-Fi SoftAP + WebSocket)"
+    select HTTPD_WS_SUPPORT
+    help
+        Performs the full PAW3395 initialization, samples motion in a
+        dedicated task, and streams every sample to a browser over a Wi-Fi
+        access point and WebSocket.  microSD logging and BLE are not started
+        in this phase so that they cannot disturb the sampling period.
+
 endchoice
 
 config PAW3395_SAMPLE_PERIOD_MS
@@ -77,5 +86,42 @@ config PAW3395_BLE_DEVICE_NAME
     default "PAW3395-Logger"
     help
         Name shown by nRF Connect while the logger is advertising.
+
+menu "Wireless monitor (phase 5)"
+    depends on PAW3395_TEST_PHASE_WIFI_MONITOR
+
+config PAW3395_MONITOR_AP_SSID
+    string "Wi-Fi access point SSID"
+    default "PAW3395-MONITOR"
+    help
+        Network name created by the XIAO ESP32-S3.  1 to 32 characters.
+
+config PAW3395_MONITOR_AP_PASSWORD
+    string "Wi-Fi access point password (WPA2)"
+    default "paw3395monitor"
+    help
+        WPA2-PSK password.  It must contain 8 to 63 characters.
+
+config PAW3395_MONITOR_AP_CHANNEL
+    int "Wi-Fi channel"
+    range 1 13
+    default 1
+
+config PAW3395_MONITOR_AP_IP
+    string "Access point IPv4 address"
+    default "192.168.4.1"
+    help
+        Address of the monitor page (http://<address>/).  The netmask is
+        255.255.255.0 and the DHCP server hands out addresses in that subnet.
+
+config PAW3395_MONITOR_AP_MAX_CLIENTS
+    int "Maximum Wi-Fi stations"
+    range 1 4
+    default 2
+    help
+        The monitor is designed for one PC.  A second slot lets the same PC
+        re-associate before the access point has noticed the old link drop.
+
+endmenu
 
 endmenu

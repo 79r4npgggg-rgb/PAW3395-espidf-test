@@ -1,0 +1,10 @@
+body { margin: 0; background: #111418; color: #e6e6e6; font: 14px "Yu Gothic UI", "Segoe UI", system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 1rem; padding: .6rem 1rem; background: #1b2027; border-bottom: 1px solid #2c333d; }
+h1 { font-size: 1.1rem; margin: 0; }
+h2 { font-size: 1rem; margin: 0 0 .5rem; }
+main { padding: 1rem; }
+.panel { background: #1b2027; border: 1px solid #2c333d; border-radius: 6px; padding: .8rem; }
+.chip { padding: .2rem .6rem; border-radius: 999px; background: #333a44; }
+.chip.ok { background: #1f6f3f; }
+.chip.bad { background: #8a2b2b; }
+pre { margin: 0; white-space: pre-wrap; }

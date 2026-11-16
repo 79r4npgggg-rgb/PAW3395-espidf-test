@@ -8,6 +8,8 @@
 #include "freertos/task.h"
 
 #include "motion_ble.h"
+#include "motion_webserver.h"
+#include "motion_wifi.h"
 #include "paw3395.h"
 #include "raw_web.h"
 #include "sd_logger.h"
@@ -99,6 +101,12 @@ void app_main(void)
         }
         vTaskDelay(pdMS_TO_TICKS(CONFIG_PAW3395_SAMPLE_PERIOD_MS));
     }
+#elif CONFIG_PAW3395_TEST_PHASE_WIFI_MONITOR
+    ESP_LOGI(TAG, "SPI probe passed; starting the PAW3395 Wi-Fi real-time monitor.");
+    ESP_ERROR_CHECK(paw3395_power_up(&sensor));
+    ESP_ERROR_CHECK(motion_wifi_start());
+    ESP_ERROR_CHECK(motion_webserver_start());
+    wait_forever();
 #else
 #error "Select a PAW3395 test phase in menuconfig"
 #endif
