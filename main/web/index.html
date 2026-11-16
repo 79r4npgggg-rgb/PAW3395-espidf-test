@@ -9,33 +9,119 @@
 <body>
 <header>
   <h1>PAW3395 Wireless Monitor</h1>
-  <div class="chip" id="chipEsp">ESP32: 確認中…</div>
+  <div class="chip" id="chipEsp" title="HTTP/WebSocket で ESP32 に到達できるか">ESP32: 確認中…</div>
   <div class="chip" id="chipWs">WebSocket: 未接続</div>
-  <div class="chip hidden bad" id="chipSynthetic">TEST DATA</div>
+  <div class="chip" id="chipSensor" title="直近のサンプルの状態">センサ: -</div>
+  <div class="chip hidden bad" id="chipSynthetic" title="ESP32 が生成したテストデータです（センサ値ではありません）">TEST DATA</div>
 </header>
+
+<section class="dashboard">
+  <div class="metric"><span>実測取得周波数</span><b id="mHz">-</b><small id="mHzNote">ESP32 時刻基準</small></div>
+  <div class="metric"><span>受信サンプル</span><b id="mReceived">0</b><small id="mPackets">パケット 0</small></div>
+  <div class="metric"><span>欠落サンプル</span><b id="mLost">0</b><small id="mLostPackets">欠落パケット 0</small></div>
+  <div class="metric"><span>SQUAL</span><b id="mSqual">-</b><small>現在値</small></div>
+  <div class="metric"><span>X（前後）</span><b id="mX">-</b><small id="mXUnit">counts/サンプル</small></div>
+  <div class="metric"><span>Y（左右）</span><b id="mY">-</b><small id="mYUnit">counts/サンプル</small></div>
+  <div class="metric"><span>Wi-Fi</span><b id="mRssi">-</b><small id="mStations">ESP32 側 RSSI</small></div>
+</section>
+
+<section class="controls">
+  <div class="group">
+    <button id="btnConnect" title="ESP32 に WebSocket 接続し受信を開始します">CONNECT</button>
+    <button id="btnDisconnect" disabled title="WebSocket を切断します（自動再接続もしません）">DISCONNECT</button>
+  </div>
+  <div class="group">
+    <button id="btnReset" title="グラフ・軌跡・統計・欠落カウンタをクリアします">RESET</button>
+  </div>
+  <div class="group">
+    <label>表示値
+      <select id="selMode">
+        <option value="raw">生データ (counts)</option>
+        <option value="phys">物理量 (変換後)</option>
+      </select>
+    </label>
+    <label>時間幅
+      <select id="selWindow">
+        <option value="1">1 秒</option>
+        <option value="5" selected>5 秒</option>
+        <option value="10">10 秒</option>
+        <option value="30">30 秒</option>
+      </select>
+    </label>
+  </div>
+</section>
+
 <main>
-  <section class="panel">
-    <button id="btnConnect">CONNECT</button>
-    <button id="btnDisconnect" disabled>DISCONNECT</button>
-  </section>
-  <section class="panel">
-    <h2>受信状況</h2>
-    <table class="kv">
-      <tr><th>受信サンプル数</th><td id="valReceived">0</td></tr>
-      <tr><th>欠落サンプル数（連番）</th><td id="valLost">0</td></tr>
-      <tr><th>欠落パケット数（パケット連番）</th><td id="valLostPackets">0</td></tr>
-      <tr><th>実測取得周波数（ESP32時刻）</th><td id="valHz">-</td></tr>
-      <tr><th>最新サンプル</th><td id="valLast">-</td></tr>
-    </table>
-  </section>
-  <section class="panel">
-    <h2>ESP32 状態（1 秒ごと）</h2>
-    <pre id="status">-</pre>
-  </section>
-  <section class="panel">
-    <h2>ログ</h2>
-    <pre id="log"></pre>
-  </section>
+  <div class="charts">
+    <section class="panel chart"><canvas id="cvX"></canvas></section>
+    <section class="panel chart"><canvas id="cvY"></canvas></section>
+    <section class="panel chart"><canvas id="cvSqual"></canvas></section>
+  </div>
+  <div class="side">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>XY 移動軌跡</h2>
+        <div class="tools">
+          <label title="オン: リセットからの全軌跡 / オフ: 時間幅の範囲のみ"><input type="checkbox" id="chkHold" checked> 保持</label>
+          <button class="small" id="btnZoomIn" title="拡大">＋</button>
+          <button class="small" id="btnZoomOut" title="縮小">－</button>
+          <button class="small" id="btnFit" title="全体が入るよう自動調整">自動</button>
+          <button class="small" id="btnTrajReset" title="軌跡と原点をリセット">軌跡リセット</button>
+        </div>
+      </div>
+      <canvas id="cvXY" class="square"></canvas>
+      <p class="note" id="xyNote"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>統計</h2><small id="statsSince"></small></div>
+      <table class="stats">
+        <thead><tr><th></th><th>X（前後）</th><th>Y（左右）</th><th>SQUAL</th></tr></thead>
+        <tbody>
+          <tr><th>最大</th><td id="sXmax">-</td><td id="sYmax">-</td><td id="sSmax">-</td></tr>
+          <tr><th>最小</th><td id="sXmin">-</td><td id="sYmin">-</td><td id="sSmin">-</td></tr>
+          <tr><th>平均</th><td id="sXmean">-</td><td id="sYmean">-</td><td id="sSmean">-</td></tr>
+          <tr><th>標準偏差</th><td id="sXstd">-</td><td id="sYstd">-</td><td id="sSstd">-</td></tr>
+        </tbody>
+      </table>
+      <table class="kv">
+        <tr><th>XY 合成値 √(X²+Y²)</th><td id="sMag">-</td></tr>
+        <tr><th>サンプル数</th><td id="sCount">-</td></tr>
+        <tr><th>実測 Hz（統計期間）</th><td id="sHz">-</td></tr>
+        <tr><th>欠落サンプル（統計期間）</th><td id="sLost">-</td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>物理量変換（PC 側で計算・保存）</h2>
+      <div class="scaling">
+        <span></span><span>傾き</span><span>切片</span>
+        <span>X（0006 / 前後）</span><input id="inXSlope" type="text" inputmode="decimal"><input id="inXIntercept" type="text" inputmode="decimal">
+        <span>Y（0007 / 左右）</span><input id="inYSlope" type="text" inputmode="decimal"><input id="inYIntercept" type="text" inputmode="decimal">
+        <span>単位</span><input id="inUnit" type="text" list="unitList"><span></span>
+      </div>
+      <datalist id="unitList"><option value="m/s"><option value="mm/s"><option value="cm/s"><option value="km/h"></datalist>
+      <p class="note">物理量 = 生データ × 傾き + 切片。生データ（int16 counts、0003/0004 と同じ値）は変換で変わりません。設定はこのブラウザに保存されます。</p>
+    </section>
+
+    <section class="panel">
+      <h2>ESP32 診断（1 秒ごと）</h2>
+      <table class="kv" id="diag">
+        <tr><th>取得周波数 / 周期</th><td id="dRate">-</td></tr>
+        <tr><th>SPI 読出し時間（最大）</th><td id="dRead">-</td></tr>
+        <tr><th>Motion bit7 ありの割合</th><td id="dMotion">-</td></tr>
+        <tr><th>遅延読出し / 読出しエラー</th><td id="dLate">-</td></tr>
+        <tr><th>未送信 / リング上書き欠落</th><td id="dBacklog">-</td></tr>
+        <tr><th>送信パケット / 送信失敗</th><td id="dSent">-</td></tr>
+        <tr><th>空きヒープ（最小）</th><td id="dHeap">-</td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>ログ</h2>
+      <pre id="log"></pre>
+    </section>
+  </div>
 </main>
 <script src="/app.js"></script>
 </body>
