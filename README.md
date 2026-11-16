@@ -182,6 +182,208 @@ BLE is intentionally optional from the logger's point of view: a disconnect
 only stops radio notifications. PAW3395 sampling and SD CSV recording continue
 unchanged while there is no central connection.
 
+## 5. Wireless real-time monitor (Wi-Fi + Chrome)
+
+Phase 5 streams **every** PAW3395 sample at 100 Hz to Google Chrome on a
+Windows PC over the XIAO's own Wi-Fi access point. Nothing has to be installed
+on the PC: the page (HTML/CSS/JS, no external libraries or CDN) is embedded in
+the firmware. Phases 1-4 are unchanged; microSD and BLE are not started in
+Phase 5 so that they cannot disturb the sampling period.
+
+### Build and use
+
+1. `idf.py menuconfig` -> `PAW3395 test firmware` -> `Test phase` ->
+   `5 - Wireless real-time monitor (Wi-Fi SoftAP + WebSocket)`.
+   Settings are in the `Wireless monitor (phase 5)` submenu (table below).
+2. `idf.py build flash monitor`. The UART log ends with
+   `Join Wi-Fi 'PAW3395-MONITOR' and open http://192.168.4.1/`.
+3. Connect the PC to Wi-Fi `PAW3395-MONITOR` (default password
+   `paw3395monitor`; change it in menuconfig) and open
+   [http://192.168.4.1/](http://192.168.4.1/) in Chrome.
+4. **CONNECT** -> **START** -> drive the car -> **STOP** -> **CSV EXPORT**.
+
+Keep the monitor tab in the foreground while recording. Chrome throttles
+timers in background tabs, which delays automatic reconnects.
+
+| menuconfig option | Default | Meaning |
+| --- | --- | --- |
+| Wi-Fi access point SSID | `PAW3395-MONITOR` | 1-32 characters |
+| Wi-Fi access point password (WPA2) | `paw3395monitor` | 8-63 characters |
+| Wi-Fi channel | 1 | 1-13 |
+| Access point IPv4 address | `192.168.4.1` | /24 subnet; DHCP server for the PC |
+| Maximum Wi-Fi stations | 2 | Designed for one PC |
+| PAW3395 read period (ms) | 10 | 10 ms = 100 Hz; needs `CONFIG_FREERTOS_HZ=1000` |
+| Samples per WebSocket packet | 5 | 5 x 10 ms = one packet every 50 ms |
+| Sample history kept on the ESP32 | 2048 | Rounded up to a power of two; 16 bytes each (20.48 s at defaults) |
+| Send generated test data | off | Link/UI test without moving the sensor; page shows `TEST DATA` |
+
+### What the X and Y values are
+
+The firmware calls the existing `paw3395_read_motion()` unchanged. Delta_X and
+Delta_Y are signed 16-bit counts: the motion the PAW3395 accumulated since the
+**previous read** (0 when Motion bit 7 is clear). They are the same values as
+BLE 0003/0004. BLE 0006/0007 ("graph") carry `delta + 32768` as uint16 only so
+that graphing apps show negative values; Phase 5 sends the signed value itself,
+so no 32768 offset exists or is subtracted anywhere.
+
+A Delta is therefore displacement per read period, proportional to speed only
+while the period is constant. The page and the CSV keep the raw counts; the
+trajectory is the running sum of the Deltas (sensor frame, no yaw correction).
+Converting counts to a physical value (CPI, lens magnification, mounting
+direction and sign) is left to the slope/intercept settings described below.
+
+### How 100 Hz is kept
+
+| Task | Core / priority | Work |
+| --- | --- | --- |
+| `paw_sampler` (motion_logger.c) | core 1 / 20 | `xTaskDelayUntil` every 10 ms -> `paw3395_read_motion()` -> write to ring buffer. No logging, Wi-Fi or allocation. |
+| `paw_ws_sender` (motion_webserver.c) | any / 5 | every 50 ms: read new samples from the ring, encode, send over WebSocket; 1 s status JSON |
+| HTTP server, lwIP, Wi-Fi | ESP-IDF defaults (Wi-Fi on core 0) | page delivery, `/ws`, TCP |
+
+- Each sample carries a sequence number (+1 per scheduled read since boot) and
+  the `esp_timer` microsecond timestamp taken just before the SPI read.
+- If Wi-Fi stalls, the sender catches up with larger packets (up to 64
+  samples each) instead of dropping samples. After a reconnect the browser
+  asks to resume from the next sequence it needs, so a gap shorter than the
+  ring history loses nothing. Anything older is counted as lost, never
+  silently skipped.
+- If a read starts after its scheduled tick, the schedule restarts (no burst
+  of catch-up reads), the sample is flagged `late`, and `late_reads` increments.
+  The resulting gap shows up in the measured rate rather than being hidden.
+- The 100 Hz SPI read rate is not the PAW3395's internal frame rate. The page
+  shows the share of reads with Motion bit 7 set as a hint of whether each read
+  carried new motion; it is not a claim that 100 new sensor frames per second
+  were captured.
+
+### Monitoring page
+
+- **Dashboard**: ESP32 reachability, WebSocket state, sensor state, `TEST DATA`
+  and `REC` markers; acquisition rate (sequence numbers / ESP32 time), received
+  rate, received/lost samples and packets, latest SQUAL/X/Y, RSSI seen by the
+  ESP32, and recording time/size/lost count.
+- **Charts**: X (0006), Y (0007) and SQUAL (0005) versus ESP32 time with a zero
+  line, a 1/5/10/30 s window and a raw/physical switch. Charts redraw at about
+  30 fps independently of data reception; gaps from lost samples are not bridged.
+- **XY trajectory**: running sum of Deltas (raw) or time integral of the scaled
+  value (physical), with origin, hold, zoom, auto-fit and reset. Screen up is
+  +X (front/back), right is +Y (left/right); axis directions and signs are
+  assumptions until checked on the car.
+- **Statistics** since START or RESET: max/min/mean/standard deviation of X, Y,
+  SQUAL, the magnitude sqrt(X^2 + Y^2), sample count, measured rate and lost
+  samples.
+- **ESP32 diagnostics** (1 s): period min/max, longest SPI read, Motion bit 7
+  share, late reads, read errors, backlog, ring overwrite losses, packets,
+  send failures and free heap.
+
+| Button | Action |
+| --- | --- |
+| CONNECT / DISCONNECT | Open the WebSocket (reconnects automatically) / close it and stop reconnecting |
+| START | Start a new recording; also resets statistics and trajectory |
+| STOP | Stop recording |
+| RESET | Clear charts, trajectory, statistics and loss counters; recorded data is kept |
+| CSV EXPORT | Download the stopped recording |
+
+### Physical-value conversion (PC side only)
+
+`X physical = X raw x X slope + X intercept` and likewise for Y, each axis with
+its own slope and intercept, plus a unit (m/s, mm/s, cm/s, ...). Changes apply
+immediately to the physical charts, statistics and trajectory. The settings are
+stored in the browser's `localStorage`, so they survive a reload and do not
+depend on which ESP32 is connected. The ESP32 never sees them; raw values are
+not modified.
+
+### CSV
+
+The file name contains the start time, sample count and acquisition rate, e.g.
+`paw3395_20261116_093404_N2488_100.00Hz.csv`. Lines starting with `#` hold
+metadata: export/start/stop times (PC clock), stop reason, firmware, protocol
+version, ESP32 boot id, nominal period, samples, first/last sequence, lost
+samples/packets, duration, acquisition and received rates, slopes, intercepts,
+unit, and one `# gap,<first missing sequence>,<count>` line per gap.
+
+| Column | Meaning |
+| --- | --- |
+| sequence | sample sequence number since ESP32 boot |
+| timestamp_us | ESP32 `esp_timer` microseconds since boot (monotonic, unwrapped) |
+| elapsed_ms | time since the first recorded sample |
+| squal | SQUAL |
+| x_raw, y_raw | Delta_X, Delta_Y int16 counts |
+| x_processed, y_processed | raw x slope + intercept, in the configured unit |
+| packet_sequence | WebSocket packet sequence number (restarts at 0 per connection) |
+| motion | PAW3395 Motion register |
+| flags | bit 0 SPI read error, bit 1 synthetic test data, bit 2 late read |
+
+Recording keeps about 23 bytes per sample in the browser and stops
+automatically at 2,000,000 samples (about 5.5 h at 100 Hz). Recording also
+stops when the ESP32 reboots (new boot id) or on DISCONNECT. The page warns
+before a reload or a new START would discard an unexported recording.
+
+### WebSocket protocol v1 (`ws://<ip>/ws`)
+
+After the handshake the ESP32 sends a JSON `hello` (protocol, boot id, period,
+samples per packet, ring size, synthetic flag). The browser answers
+`{"cmd":"stream"}` for live data or `{"cmd":"stream","from":<sequence>}` to
+resume. Status JSON follows once per second. Samples arrive as binary
+messages, all fields little-endian (see `main/motion_protocol.h`):
+
+| Offset | Type | Header field (16 bytes) |
+| --- | --- | --- |
+| 0 | char[2] | magic `PW` |
+| 2 | uint8 | protocol version (1) |
+| 3 | uint8 | header size (16) |
+| 4 | uint8 | sample size (16) |
+| 5 | uint8 | sample count (1-64) |
+| 6 | uint16 | reserved |
+| 8 | uint32 | packet sequence (0 at each connection) |
+| 12 | uint32 | nominal sample period in us |
+
+| Offset | Type | Sample field (16 bytes each) |
+| --- | --- | --- |
+| 0 | uint32 | sample sequence |
+| 4 | uint32 | timestamp in us (low 32 bits; the browser unwraps it) |
+| 8 | int16 | Delta_X |
+| 10 | int16 | Delta_Y |
+| 12 | uint8 | SQUAL |
+| 13 | uint8 | Motion register |
+| 14 | uint8 | flags |
+| 15 | uint8 | reserved |
+
+Only one browser streams at a time; a new connection replaces the old one.
+
+### Testing the page without hardware
+
+`tools/mock_device.py` (Python 3 standard library only) serves `main/web` and
+emulates the same HTTP/WebSocket protocol with generated data:
+
+~~~sh
+python tools/mock_device.py --port 8080
+# open http://127.0.0.1:8080/ in Chrome
+~~~
+
+`--drop-every N` omits every N-th packet, `--disconnect-every S` closes the
+connection every S seconds, and `--stall-at S --stall-seconds T` pauses
+sending once per connection, so loss detection, resume and CSV gap reporting
+can be checked.
+
+### Checks on the real car
+
+| Item | Pass criterion |
+| --- | --- |
+| Wi-Fi | Windows connects to `PAW3395-MONITOR` and stays connected |
+| Web page | `http://192.168.4.1/` opens in Chrome |
+| WebSocket | Stays connected; reconnects and resumes after Wi-Fi interruptions |
+| Sensor reads | Acquisition rate about 100 Hz, period about 10 ms, read errors 0 |
+| Display | X/Y/SQUAL update in real time |
+| CSV | Every received sample is saved; gaps are listed |
+| Loss detection | Lost samples are counted from sequence numbers |
+| Endurance | 10 minutes or longer recording |
+| Existing function | Phases 1-4 still build and behave as before |
+
+Suggested runs: stationary, slow straight, forward/reverse, slalom, full
+acceleration, hard stop and lateral slip. The CSV `x_raw`/`y_raw` columns are
+the same values as BLE 0003/0004 (0006/0007 minus 32768), so earlier BLE
+Insight CSV files can be compared directly.
+
 ## Design notes
 
 - SPI is Mode 0 at 1 MHz. PAW3395 samples MOSI on rising SCLK edges and presents MISO after falling edges.
