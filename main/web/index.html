@@ -9,12 +9,28 @@
 <body>
 <header>
   <h1>PAW3395 Wireless Monitor</h1>
-  <div class="chip" id="link">ESP32: 確認中…</div>
+  <div class="chip" id="chipEsp">ESP32: 確認中…</div>
+  <div class="chip" id="chipWs">WebSocket: 未接続</div>
+  <div class="chip hidden bad" id="chipSynthetic">TEST DATA</div>
 </header>
 <main>
   <section class="panel">
-    <h2>ESP32 情報</h2>
-    <pre id="info">-</pre>
+    <button id="btnConnect">CONNECT</button>
+    <button id="btnDisconnect" disabled>DISCONNECT</button>
+  </section>
+  <section class="panel">
+    <h2>受信状況</h2>
+    <table class="kv">
+      <tr><th>受信サンプル数</th><td id="valReceived">0</td></tr>
+      <tr><th>欠落サンプル数（連番）</th><td id="valLost">0</td></tr>
+      <tr><th>欠落パケット数（パケット連番）</th><td id="valLostPackets">0</td></tr>
+      <tr><th>実測取得周波数（ESP32時刻）</th><td id="valHz">-</td></tr>
+      <tr><th>最新サンプル</th><td id="valLast">-</td></tr>
+    </table>
+  </section>
+  <section class="panel">
+    <h2>ログ</h2>
+    <pre id="log"></pre>
   </section>
 </main>
 <script src="/app.js"></script>

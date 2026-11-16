@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 
 #include "motion_ble.h"
+#include "motion_logger.h"
 #include "motion_webserver.h"
 #include "motion_wifi.h"
 #include "paw3395.h"
@@ -104,8 +105,21 @@ void app_main(void)
 #elif CONFIG_PAW3395_TEST_PHASE_WIFI_MONITOR
     ESP_LOGI(TAG, "SPI probe passed; starting the PAW3395 Wi-Fi real-time monitor.");
     ESP_ERROR_CHECK(paw3395_power_up(&sensor));
+
+    /* Dev phase 3: stream generated test data to verify the WebSocket link. */
+    const motion_logger_config_t logger_config = {
+        .period_ms = 10,
+        .ring_samples = 2048,
+        .synthetic = true,
+    };
+    ESP_ERROR_CHECK(motion_logger_start(&sensor, &logger_config));
     ESP_ERROR_CHECK(motion_wifi_start());
-    ESP_ERROR_CHECK(motion_webserver_start());
+    const motion_webserver_config_t web_config = {
+        .sample_period_ms = logger_config.period_ms,
+        .samples_per_packet = 5,
+        .synthetic = logger_config.synthetic,
+    };
+    ESP_ERROR_CHECK(motion_webserver_start(&web_config));
     wait_forever();
 #else
 #error "Select a PAW3395 test phase in menuconfig"
