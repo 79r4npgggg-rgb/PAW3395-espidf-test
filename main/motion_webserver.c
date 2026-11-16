@@ -28,7 +28,7 @@
 #if CONFIG_HTTPD_WS_SUPPORT
 
 #define SENDER_TASK_PRIORITY 5
-#define SENDER_TASK_STACK    4096
+#define SENDER_TASK_STACK    6144
 #define STATUS_INTERVAL_US   1000000
 /* Packets sent back-to-back per wake-up while catching up after a stall. */
 #define MAX_PACKETS_PER_WAKE 8

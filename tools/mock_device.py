@@ -16,6 +16,7 @@ Fault injection for testing the browser side:
 import argparse
 import asyncio
 import base64
+import collections
 import hashlib
 import json
 import math
@@ -47,13 +48,16 @@ class Sampler:
         self.next_seq = 0
         self.t0 = time.monotonic()
         self.boot_us = random.randint(5_000_000, 20_000_000)
-        self.window = []
+        self.window = collections.deque()
 
     def now_us(self):
         return self.boot_us + int((time.monotonic() - self.t0) * 1e6)
 
     def produce_until_now(self):
         due = int((time.monotonic() - self.t0) * 1e6) // self.period_us
+        if due - self.next_seq >= self.ring_samples:
+            # Samples older than the ring would be overwritten anyway; only their sequence numbers advance.
+            self.next_seq = due - self.ring_samples + 1
         while self.next_seq <= due:
             seq = self.next_seq
             ts = self.boot_us + seq * self.period_us + random.randint(0, 40)
@@ -67,7 +71,7 @@ class Sampler:
             self.window.append(ts)
             self.next_seq += 1
         while len(self.window) > 2 and self.window[-1] - self.window[0] > 1_000_000:
-            self.window.pop(0)
+            self.window.popleft()
 
     def read(self, cursor, max_samples):
         """Return (samples, new_cursor, lost) with the same clamping as motion_logger_read()."""
@@ -238,7 +242,7 @@ class MockDevice:
                             break
                 if time.monotonic() >= next_status:
                     next_status = time.monotonic() + 1.0
-                    w = s.window
+                    w = list(s.window)
                     periods = [b - a for a, b in zip(w, w[1:])] or [0]
                     status = {"type": "status", "boot_id": self.boot_id, "uptime_ms": s.now_us() // 1000,
                               "next_seq": s.next_seq, "window_samples": max(0, len(w) - 1),
