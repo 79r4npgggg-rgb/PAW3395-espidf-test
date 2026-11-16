@@ -13,6 +13,7 @@
   <div class="chip" id="chipWs">WebSocket: 未接続</div>
   <div class="chip" id="chipSensor" title="直近のサンプルの状態">センサ: -</div>
   <div class="chip hidden bad" id="chipSynthetic" title="ESP32 が生成したテストデータです（センサ値ではありません）">TEST DATA</div>
+  <div class="chip hidden rec" id="chipRec">● REC</div>
 </header>
 
 <section class="dashboard">
@@ -23,6 +24,7 @@
   <div class="metric"><span>X（前後）</span><b id="mX">-</b><small id="mXUnit">counts/サンプル</small></div>
   <div class="metric"><span>Y（左右）</span><b id="mY">-</b><small id="mYUnit">counts/サンプル</small></div>
   <div class="metric"><span>Wi-Fi</span><b id="mRssi">-</b><small id="mStations">ESP32 側 RSSI</small></div>
+  <div class="metric"><span>記録時間</span><b id="mRecTime">-</b><small id="mRecInfo">未記録</small></div>
 </section>
 
 <section class="controls">
@@ -31,7 +33,10 @@
     <button id="btnDisconnect" disabled title="WebSocket を切断します（自動再接続もしません）">DISCONNECT</button>
   </div>
   <div class="group">
-    <button id="btnReset" title="グラフ・軌跡・統計・欠落カウンタをクリアします">RESET</button>
+    <button id="btnStart" class="primary" disabled title="記録を開始します（統計と軌跡もリセット）。受信中のみ押せます">START</button>
+    <button id="btnStop" class="danger" disabled title="記録を停止します">STOP</button>
+    <button id="btnReset" title="グラフ・軌跡・統計・欠落カウンタをクリアします（記録データは消しません）">RESET</button>
+    <button id="btnExport" disabled title="停止した記録の全サンプルを CSV で保存します">CSV EXPORT</button>
   </div>
   <div class="group">
     <label>表示値

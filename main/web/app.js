@@ -149,7 +149,10 @@ const tracker = {
     this.packets++;
     if (this.nextPacketSeq !== null && packet.packetSeq !== this.nextPacketSeq) {
       const d = seqDiff(packet.packetSeq, this.nextPacketSeq);
-      if (d > 0) this.lostPackets += d;
+      if (d > 0) {
+        this.lostPackets += d;
+        recorder.onPacketLoss(d);
+      }
     }
     this.nextPacketSeq = (packet.packetSeq + 1) % U32;
     this.periodUs = packet.periodUs;
@@ -362,6 +365,202 @@ function packetRate() {
 }
 
 // ===================================================================
+// Recorder: every received sample from START to STOP, kept apart from the
+// display buffers, in chunked typed arrays (about 23 bytes per sample)
+// ===================================================================
+const RECORD_CHUNK = 65536;
+const RECORD_MAX_SAMPLES = 2000000; // about 5.5 h at 100 Hz, about 46 MB
+const RECORD_BYTES_PER_SAMPLE = 23;
+const MAX_GAPS_IN_CSV = 1000;
+
+function newRecordChunk() {
+  return {
+    seq: new Uint32Array(RECORD_CHUNK),
+    ts: new Float64Array(RECORD_CHUNK),
+    x: new Int16Array(RECORD_CHUNK),
+    y: new Int16Array(RECORD_CHUNK),
+    q: new Uint8Array(RECORD_CHUNK),
+    m: new Uint8Array(RECORD_CHUNK),
+    f: new Uint8Array(RECORD_CHUNK),
+    p: new Uint32Array(RECORD_CHUNK),
+  };
+}
+
+function isoLocal(date) {
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  const off = -date.getTimezoneOffset();
+  return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + 'T' +
+    pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds()) + '.' +
+    pad(date.getMilliseconds(), 3) + (off >= 0 ? '+' : '-') + pad(Math.floor(Math.abs(off) / 60)) + ':' + pad(Math.abs(off) % 60);
+}
+function stampForFile(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return date.getFullYear() + pad(date.getMonth() + 1) + pad(date.getDate()) + '_' +
+    pad(date.getHours()) + pad(date.getMinutes()) + pad(date.getSeconds());
+}
+// Shortest decimal text that round-trips to 12 significant digits.
+const csvNumber = (v) => String(Number(v.toPrecision(12)));
+
+const recorder = {
+  state: 'idle', // idle | recording | stopped
+  chunks: [],
+  count: 0,
+  exported: true,
+  startedAt: null,
+  stoppedAt: null,
+  stopReason: '',
+  bootId: null,
+  periodUs: 0,
+  firmware: '',
+  lost: 0,
+  lostPackets: 0,
+  gaps: [],
+  start() {
+    this.chunks = [];
+    this.count = 0;
+    this.exported = false;
+    this.startedAt = new Date();
+    this.stoppedAt = null;
+    this.stopReason = '';
+    this.bootId = tracker.bootId;
+    this.periodUs = tracker.periodUs;
+    this.firmware = deviceInfo ? deviceInfo.firmware : '';
+    this.lost = 0;
+    this.lostPackets = 0;
+    this.gaps = [];
+    this.state = 'recording';
+  },
+  stop(reason) {
+    if (this.state !== 'recording') return;
+    this.state = 'stopped';
+    this.stoppedAt = new Date();
+    this.stopReason = reason;
+  },
+  push(s) {
+    if (this.state !== 'recording') return;
+    if (this.count >= RECORD_MAX_SAMPLES) {
+      this.stop('max_samples');
+      logLine('記録上限 ' + RECORD_MAX_SAMPLES.toLocaleString() + ' サンプルに達したため記録を停止しました');
+      updateButtons();
+      return;
+    }
+    const ci = Math.floor(this.count / RECORD_CHUNK);
+    if (ci === this.chunks.length) this.chunks.push(newRecordChunk());
+    const c = this.chunks[ci];
+    const i = this.count % RECORD_CHUNK;
+    c.seq[i] = s.seq;
+    c.ts[i] = s.tsUs;
+    c.x[i] = s.x;
+    c.y[i] = s.y;
+    c.q[i] = s.squal;
+    c.m[i] = s.motion;
+    c.f[i] = s.flags;
+    c.p[i] = s.packetSeq;
+    this.count++;
+  },
+  onGap(fromSeq, count) {
+    if (this.state !== 'recording' || this.count === 0) return;
+    this.lost += count;
+    this.gaps.push({ fromSeq, count });
+  },
+  onPacketLoss(count) {
+    if (this.state === 'recording' && this.count > 0) this.lostPackets += count;
+  },
+  at(k) {
+    return [this.chunks[Math.floor(k / RECORD_CHUNK)], k % RECORD_CHUNK];
+  },
+  summary() {
+    if (this.count === 0) return null;
+    const [c0, i0] = this.at(0);
+    const [c1, i1] = this.at(this.count - 1);
+    const duration = (c1.ts[i1] - c0.ts[i0]) / 1e6;
+    const reads = seqDiff(c1.seq[i1], c0.seq[i0]);
+    return {
+      firstTs: c0.ts[i0],
+      firstSeq: c0.seq[i0],
+      lastSeq: c1.seq[i1],
+      duration,
+      acquisitionHz: duration > 0 ? reads / duration : null,
+      receivedHz: duration > 0 ? (this.count - 1) / duration : null,
+    };
+  },
+  buildCsv() {
+    const sum = this.summary();
+    if (!sum) return null;
+    const meta = [
+      ['PAW3395 Wireless Monitor CSV'],
+      ['csv_format_version', 1],
+      ['exported_at', isoLocal(new Date())],
+      ['record_start_pc', isoLocal(this.startedAt)],
+      ['record_stop_pc', this.stoppedAt ? isoLocal(this.stoppedAt) : ''],
+      ['stop_reason', this.stopReason],
+      ['firmware', this.firmware],
+      ['protocol_version', PROTOCOL_VERSION],
+      ['device_boot_id', this.bootId],
+      ['nominal_period_us', this.periodUs],
+      ['samples', this.count],
+      ['first_sequence', sum.firstSeq],
+      ['last_sequence', sum.lastSeq],
+      ['lost_samples', this.lost],
+      ['lost_packets', this.lostPackets],
+      ['duration_s', sum.duration.toFixed(6)],
+      ['acquisition_rate_hz', sum.acquisitionHz === null ? '' : sum.acquisitionHz.toFixed(3)],
+      ['received_rate_hz', sum.receivedHz === null ? '' : sum.receivedHz.toFixed(3)],
+      ['x_slope', scaling.xSlope],
+      ['x_intercept', scaling.xIntercept],
+      ['y_slope', scaling.ySlope],
+      ['y_intercept', scaling.yIntercept],
+      ['unit', scaling.unit],
+      ['note', 'timestamp_us = ESP32 esp_timer microseconds since boot (monotonic; not wall-clock time)'],
+      ['note', 'x_raw/y_raw = PAW3395 Delta_X/Delta_Y int16 counts accumulated since the previous read (BLE 0003/0004; BLE 0006/0007 = raw + 32768)'],
+      ['note', 'x_processed = x_raw * x_slope + x_intercept; y_processed = y_raw * y_slope + y_intercept [unit]'],
+      ['note', 'flags bit0 = SPI read error; bit1 = synthetic test data; bit2 = read started late'],
+      ['note', 'missing sequence numbers were not received; each is listed below as gap,<first missing sequence>,<count>'],
+    ];
+    const parts = [meta.map((row) => '# ' + row.join(',')).join('\n') + '\n'];
+    const gapLines = this.gaps.slice(0, MAX_GAPS_IN_CSV).map((g) => '# gap,' + g.fromSeq + ',' + g.count);
+    if (this.gaps.length > MAX_GAPS_IN_CSV) gapLines.push('# gap_list_truncated,' + this.gaps.length);
+    if (gapLines.length) parts.push(gapLines.join('\n') + '\n');
+    parts.push('sequence,timestamp_us,elapsed_ms,squal,x_raw,y_raw,x_processed,y_processed,packet_sequence,motion,flags\n');
+
+    const { xSlope, xIntercept, ySlope, yIntercept } = scaling;
+    let rows = [];
+    for (let k = 0; k < this.count; k++) {
+      const [c, i] = this.at(k);
+      const x = c.x[i];
+      const y = c.y[i];
+      rows.push(c.seq[i] + ',' + c.ts[i] + ',' + ((c.ts[i] - sum.firstTs) / 1000).toFixed(3) + ',' + c.q[i] + ',' +
+        x + ',' + y + ',' + csvNumber(x * xSlope + xIntercept) + ',' + csvNumber(y * ySlope + yIntercept) + ',' +
+        c.p[i] + ',' + c.m[i] + ',' + c.f[i]);
+      if (rows.length === 20000) {
+        parts.push(rows.join('\n') + '\n');
+        rows = [];
+      }
+    }
+    if (rows.length) parts.push(rows.join('\n') + '\n');
+
+    const hz = sum.acquisitionHz === null ? 'NA' : sum.acquisitionHz.toFixed(2);
+    const name = 'paw3395_' + stampForFile(this.startedAt) + '_N' + this.count + '_' + hz + 'Hz.csv';
+    return { name, parts };
+  },
+  exportCsv() {
+    const csv = this.buildCsv();
+    if (!csv) return;
+    const { name, parts } = csv;
+    const url = URL.createObjectURL(new Blob(parts, { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    this.exported = true;
+    logLine('CSV 出力: ' + name + '（' + this.count.toLocaleString() + ' 行）');
+  },
+};
+
+// ===================================================================
 // Incoming data
 // ===================================================================
 let lastSample = null;
@@ -371,6 +570,7 @@ let deviceInfo = null;
 
 function onGap(fromSeq, count) {
   stats.lost += count;
+  recorder.onGap(fromSeq, count);
   logLine('欠落検出: seq ' + fromSeq + ' から ' + count + ' サンプル');
 }
 
@@ -387,6 +587,7 @@ function onSample(s) {
   ring.push(s);
   traj.add(s);
   stats.add(s);
+  recorder.push(s);
   lastSample = s;
   lastSampleAt = performance.now();
 }
@@ -394,6 +595,10 @@ function onSample(s) {
 function onHello(hello) {
   deviceInfo = hello;
   if (tracker.bootId !== null && tracker.bootId !== hello.boot_id) {
+    if (recorder.state === 'recording') {
+      recorder.stop('device_reboot');
+      logLine('ESP32 の再起動を検出したため記録を停止しました（記録済みデータは CSV 出力できます）');
+    }
     logLine('ESP32 の再起動を検出: 連番と時刻がリセットされたため表示をクリアします');
     clearDisplay();
   }
@@ -431,6 +636,11 @@ const link = {
     this.open();
   },
   disconnect() {
+    if (recorder.state === 'recording') {
+      if (!confirm('記録中です。切断すると記録を停止します。切断しますか？')) return;
+      recorder.stop('user_disconnect');
+      logLine('切断のため記録を停止しました');
+    }
     this.wanted = false;
     clearTimeout(this.reconnectTimer);
     if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null; }
@@ -501,8 +711,7 @@ const link = {
     const [text, cls] = labels[state];
     $('chipWs').textContent = text;
     $('chipWs').className = 'chip ' + cls;
-    $('btnConnect').disabled = this.wanted;
-    $('btnDisconnect').disabled = !this.wanted;
+    updateButtons();
   },
 };
 
@@ -867,6 +1076,8 @@ function updateDom() {
   $('sHz').textContent = statsHz === null ? '-' : statsHz.toFixed(2) + ' Hz（' + fmtDuration(span) + '）';
   $('sLost').textContent = stats.lost.toLocaleString();
   $('statsSince').textContent = stats.since ? stats.since.toLocaleTimeString() + ' から' : '';
+  updateRecordingMetric();
+  updateButtons();
   $('xyNote').textContent = ui.mode === 'raw'
     ? 'センサ座標系の累積変位（Delta の総和、counts）。車体のヨー角は補正していないため、旋回すると実際の走行軌跡とは異なります。軸の向き・符号は未確認の仮定です。'
     : 'センサ座標系での物理量の時間積分 ∫(X, Y) dt。単位が「…/s」なら「…」の移動量です。ヨー角は補正していません。';
@@ -905,13 +1116,67 @@ function bindScalingInputs() {
   unit.addEventListener('input', () => { scaling.unit = unit.value; saveScaling(); });
 }
 
+function updateButtons() {
+  const recording = recorder.state === 'recording';
+  $('btnConnect').disabled = link.wanted;
+  $('btnDisconnect').disabled = !link.wanted;
+  $('btnStart').disabled = recording || link.state !== 'open';
+  $('btnStop').disabled = !recording;
+  $('btnExport').disabled = recorder.state !== 'stopped' || recorder.count === 0;
+  $('chipRec').classList.toggle('hidden', !recording);
+}
+
+function updateRecordingMetric() {
+  const sum = recorder.summary();
+  const time = $('mRecTime');
+  const info = $('mRecInfo');
+  if (recorder.state === 'idle') {
+    time.textContent = '-';
+    info.textContent = '未記録';
+    return;
+  }
+  time.textContent = sum ? fmtDuration(sum.duration) : '0:00';
+  const mb = (recorder.count * RECORD_BYTES_PER_SAMPLE / 1048576).toFixed(1);
+  const state = recorder.state === 'recording' ? '記録中' : '停止' + (recorder.exported ? '（CSV 出力済）' : '（未出力）');
+  info.textContent = state + ' ' + recorder.count.toLocaleString() + ' 件 / ' + mb + ' MB / 欠落 ' + recorder.lost;
+  time.parentElement.classList.toggle('alert', recorder.lost > 0);
+}
+
 $('btnConnect').onclick = () => link.connect();
 $('btnDisconnect').onclick = () => link.disconnect();
+$('btnStart').onclick = () => {
+  if (recorder.state === 'stopped' && !recorder.exported &&
+      !confirm('前回の記録（' + recorder.count.toLocaleString() + ' 件）はまだ CSV 出力されていません。破棄して新しく記録しますか？')) {
+    return;
+  }
+  stats.reset();
+  traj.reset();
+  recorder.start();
+  updateButtons();
+  logLine('START: 記録開始（統計と軌跡をリセット）');
+};
+$('btnStop').onclick = () => {
+  recorder.stop('user');
+  updateButtons();
+  const sum = recorder.summary();
+  logLine('STOP: ' + recorder.count.toLocaleString() + ' サンプル、' + (sum ? fmtDuration(sum.duration) : '0:00') +
+    '、欠落 ' + recorder.lost + ' サンプル');
+};
+$('btnExport').onclick = () => {
+  recorder.exportCsv();
+  updateButtons();
+};
 $('btnReset').onclick = () => {
   clearDisplay();
   tracker.resetCounters();
-  logLine('RESET: グラフ・軌跡・統計・欠落カウンタをクリアしました');
+  logLine('RESET: グラフ・軌跡・統計・欠落カウンタをクリアしました（記録データは保持）');
 };
+window.addEventListener('beforeunload', (event) => {
+  if (recorder.state === 'recording' || (recorder.state === 'stopped' && !recorder.exported)) {
+    event.preventDefault();
+    event.returnValue = '';
+  }
+});
 $('selMode').onchange = (e) => { ui.mode = e.target.value; };
 $('selWindow').onchange = (e) => { ui.windowS = Number(e.target.value); };
 $('btnZoomIn').onclick = () => trajView.zoom(1.5);
