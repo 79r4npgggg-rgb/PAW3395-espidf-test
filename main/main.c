@@ -106,17 +106,22 @@ void app_main(void)
     ESP_LOGI(TAG, "SPI probe passed; starting the PAW3395 Wi-Fi real-time monitor.");
     ESP_ERROR_CHECK(paw3395_power_up(&sensor));
 
-    /* Dev phase 3: stream generated test data to verify the WebSocket link. */
+    /* Only the sampling task touches the PAW3395 from here on; Wi-Fi and
+     * WebSocket work happens in other tasks and reads from its ring buffer. */
     const motion_logger_config_t logger_config = {
-        .period_ms = 10,
-        .ring_samples = 2048,
+        .period_ms = CONFIG_PAW3395_MONITOR_SAMPLE_PERIOD_MS,
+        .ring_samples = CONFIG_PAW3395_MONITOR_RING_SAMPLES,
+#if CONFIG_PAW3395_MONITOR_SYNTHETIC_DATA
         .synthetic = true,
+#else
+        .synthetic = false,
+#endif
     };
     ESP_ERROR_CHECK(motion_logger_start(&sensor, &logger_config));
     ESP_ERROR_CHECK(motion_wifi_start());
     const motion_webserver_config_t web_config = {
         .sample_period_ms = logger_config.period_ms,
-        .samples_per_packet = 5,
+        .samples_per_packet = CONFIG_PAW3395_MONITOR_SAMPLES_PER_PACKET,
         .synthetic = logger_config.synthetic,
     };
     ESP_ERROR_CHECK(motion_webserver_start(&web_config));

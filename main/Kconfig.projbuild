@@ -122,6 +122,43 @@ config PAW3395_MONITOR_AP_MAX_CLIENTS
         The monitor is designed for one PC.  A second slot lets the same PC
         re-associate before the access point has noticed the old link drop.
 
+config PAW3395_MONITOR_SAMPLE_PERIOD_MS
+    int "PAW3395 read period (ms)"
+    range 2 1000
+    default 10
+    help
+        Period of the dedicated sampling task (10 ms = 100 Hz).  It must be a
+        whole number of FreeRTOS ticks; this project uses CONFIG_FREERTOS_HZ=1000.
+        Every read returns the motion the sensor accumulated since the previous
+        read, so a slower period loses time resolution but not displacement.
+
+config PAW3395_MONITOR_SAMPLES_PER_PACKET
+    int "Samples per WebSocket packet"
+    range 1 20
+    default 5
+    help
+        The sender wakes every (period x this value), i.e. every 50 ms by
+        default, and sends all samples collected since the previous packet.
+        After a stall it catches up with larger packets; samples are never
+        thinned out.
+
+config PAW3395_MONITOR_RING_SAMPLES
+    int "Sample history kept on the ESP32"
+    range 256 8192
+    default 2048
+    help
+        Rounded up to a power of two.  Samples are 16 bytes each in internal
+        RAM.  After a Wi-Fi interruption shorter than this history (20.48 s at
+        the defaults) the browser resumes without losing samples.
+
+config PAW3395_MONITOR_SYNTHETIC_DATA
+    bool "Send generated test data instead of PAW3395 readings"
+    default n
+    help
+        For checking Wi-Fi, WebSocket and the browser without moving the
+        sensor.  The page shows TEST DATA and every sample carries the
+        synthetic flag.  The PAW3395 identity check still runs at boot.
+
 endmenu
 
 endmenu

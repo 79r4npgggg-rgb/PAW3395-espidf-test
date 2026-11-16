@@ -213,6 +213,17 @@ function onSample(s) {
 let lastStatus = null;
 function onStatus(status) {
   lastStatus = status;
+  const hz = status.window_us > 0 ? (status.window_samples * 1e6 / status.window_us).toFixed(2) : '-';
+  const motionPct = status.window_samples > 0 ? (100 * status.motion_samples / status.window_samples).toFixed(0) : '-';
+  document.getElementById('status').textContent =
+    '取得周波数 ' + hz + ' Hz / 周期 ' + status.min_period_us + '〜' + status.max_period_us + ' us' +
+    ' / SPI読出し最大 ' + status.max_read_us + ' us\n' +
+    'Motion bit7 ありの割合 ' + motionPct + ' % / 遅延読出し累計 ' + status.late_reads +
+    ' / 読出しエラー累計 ' + status.read_errors + '\n' +
+    '未送信 ' + status.backlog + ' / リング上書きで欠落 ' + status.ring_lost +
+    ' / 送信パケット ' + status.packets + ' / 送信失敗 ' + status.send_failures + '\n' +
+    'Wi-Fi 接続台数 ' + status.stations + ' / RSSI ' + status.rssi_dbm + ' dBm' +
+    ' / 空きヒープ ' + status.free_heap + ' (最小 ' + status.min_free_heap + ') bytes';
 }
 
 // ---- ESP32 reachability over HTTP when the WebSocket is not open ----
