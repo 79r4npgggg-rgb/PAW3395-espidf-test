@@ -27,6 +27,7 @@ static motion_sample_t *s_ring;
 static uint32_t s_ring_size; /* power of two */
 static uint32_t s_ring_mask;
 static uint32_t s_next_sequence;       /* guarded by s_lock */
+static uint32_t s_filled;              /* retained samples, saturates at s_ring_size; guarded by s_lock */
 static motion_logger_stats_t s_stats;  /* guarded by s_lock */
 static paw3395_t *s_sensor;
 static motion_logger_config_t s_config;
@@ -135,6 +136,9 @@ static void sampler_task(void *arg)
         portENTER_CRITICAL(&s_lock);
         s_ring[sequence & s_ring_mask] = sample;
         s_next_sequence = sequence + 1;
+        if (s_filled < s_ring_size) {
+            ++s_filled;
+        }
         s_stats.read_errors = read_errors;
         s_stats.late_reads = late_reads;
         portEXIT_CRITICAL(&s_lock);
@@ -208,7 +212,8 @@ size_t motion_logger_read(uint32_t *cursor, motion_sample_t *samples, size_t max
 
     portENTER_CRITICAL(&s_lock);
     const uint32_t next = s_next_sequence;
-    const uint32_t retained = next < s_ring_size ? next : s_ring_size;
+    /* Independent of the sequence value, so this stays correct when it wraps. */
+    const uint32_t retained = s_filled;
     if ((int32_t)(next - position) < 0) {
         position = next;
     } else if (next - position > retained) {

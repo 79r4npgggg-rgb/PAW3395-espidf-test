@@ -12,6 +12,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "sdkconfig.h"
@@ -73,6 +74,25 @@ static motion_webserver_config_t s_config;
 static uint32_t s_boot_id;
 static portMUX_TYPE s_client_lock = portMUX_INITIALIZER_UNLOCKED;
 static ws_client_t s_client = {.fd = -1};
+/* SSID as a JSON string body: up to 32 bytes, each at most 6 characters escaped. */
+static char s_ssid_json[32 * 6 + 1];
+
+static void json_escape(const char *in, char *out, size_t capacity)
+{
+    size_t n = 0;
+    for (; *in != '\0' && n + 7 < capacity; ++in) {
+        const unsigned char c = (unsigned char)*in;
+        if (c == '"' || c == '\\') {
+            out[n++] = '\\';
+            out[n++] = (char)c;
+        } else if (c < 0x20) {
+            n += (size_t)snprintf(out + n, capacity - n, "\\u%04x", (unsigned int)c);
+        } else {
+            out[n++] = (char)c;
+        }
+    }
+    out[n] = '\0';
+}
 
 static esp_err_t static_file_handler(httpd_req_t *request)
 {
@@ -88,14 +108,14 @@ static esp_err_t info_handler(httpd_req_t *request)
     int rssi = 0;
     motion_wifi_get_link(&stations, &rssi);
 
-    char body[320];
+    char body[512];
     const int length = snprintf(
         body, sizeof(body),
         "{\"firmware\":\"paw3395-wifi-monitor\",\"protocol\":%d,\"boot_id\":\"%08" PRIx32 "\","
         "\"uptime_ms\":%" PRIu64 ",\"ssid\":\"%s\",\"ip\":\"%s\",\"stations\":%d,\"rssi_dbm\":%d,"
         "\"period_us\":%" PRIu32 ",\"synthetic\":%s}",
         MOTION_PROTOCOL_VERSION, s_boot_id, (uint64_t)esp_timer_get_time() / 1000U,
-        motion_wifi_ssid(), motion_wifi_ip(), stations, rssi,
+        s_ssid_json, motion_wifi_ip(), stations, rssi,
         s_config.sample_period_ms * 1000U, s_config.synthetic ? "true" : "false");
     if (length < 0 || length >= (int)sizeof(body)) {
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "info too long");
@@ -150,7 +170,8 @@ static esp_err_t ws_handler(httpd_req_t *request)
         s_client.request = STREAM_REQUEST_NONE;
         portEXIT_CRITICAL(&s_client_lock);
         if (previous_fd >= 0 && previous_fd != fd) {
-            httpd_sess_trigger_close(s_server, previous_fd);
+            /* Still open (its close callback would have cleared s_client.fd). */
+            shutdown(previous_fd, SHUT_RDWR);
         }
         const int no_delay = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay));
@@ -194,24 +215,79 @@ static void session_closed(httpd_handle_t server, int fd)
     close(fd);
 }
 
-static esp_err_t send_ws(int fd, httpd_ws_type_t type, const void *data, size_t length)
+/* Identifies one WebSocket connection; lwIP reuses fd numbers after a close. */
+typedef struct {
+    int fd;
+    uint32_t generation;
+} ws_target_t;
+
+typedef struct {
+    ws_target_t target;
+    bool close_session;
+    httpd_ws_frame_t frame;
+    esp_err_t result;
+} ws_job_t;
+
+/* One job at a time, issued only by the sender task. */
+static ws_job_t s_job;
+static SemaphoreHandle_t s_job_done;
+
+/*
+ * Runs in the HTTP server task.  The handshake handler and the close callback
+ * run there too, so the client cannot be replaced between this check and the
+ * send or close: a frame or close meant for an old connection is never applied
+ * to a new connection that happens to get the same fd number.
+ */
+static void ws_job_run(void *arg)
 {
-    if (httpd_ws_get_fd_info(s_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
-        return ESP_ERR_INVALID_STATE;
+    ws_job_t *job = arg;
+    portENTER_CRITICAL(&s_client_lock);
+    const bool current = s_client.fd == job->target.fd && s_client.generation == job->target.generation;
+    portEXIT_CRITICAL(&s_client_lock);
+
+    if (!current || httpd_ws_get_fd_info(s_server, job->target.fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
+        job->result = ESP_ERR_INVALID_STATE;
+    } else if (job->close_session) {
+        /* Not httpd_sess_trigger_close(): that queues another callback, which could
+         * run after this fd has been reused.  The server cleans up on the EOF. */
+        job->result = shutdown(job->target.fd, SHUT_RDWR) == 0 ? ESP_OK : ESP_FAIL;
+    } else {
+        job->result = httpd_ws_send_frame_async(s_server, job->target.fd, &job->frame);
+        if (job->result == ESP_OK) {
+            /* The browser rarely sends on this socket; keep LRU purge from picking it. */
+            httpd_sess_update_lru_counter(s_server, job->target.fd);
+        }
     }
-    httpd_ws_frame_t frame = {
-        .type = type,
-        .payload = (uint8_t *)data,
-        .len = length,
-    };
-    return httpd_ws_send_data(s_server, fd, &frame);
+    xSemaphoreGive(s_job_done);
 }
 
-static esp_err_t send_hello(int fd)
+static esp_err_t run_ws_job(const ws_target_t *target, bool close_session, httpd_ws_type_t type,
+                            const void *data, size_t length)
+{
+    s_job = (ws_job_t){
+        .target = *target,
+        .close_session = close_session,
+        .frame = {.type = type, .payload = (uint8_t *)data, .len = length},
+        .result = ESP_FAIL,
+    };
+    const esp_err_t err = httpd_queue_work(s_server, ws_job_run, &s_job);
+    if (err != ESP_OK) {
+        return err;
+    }
+    xSemaphoreTake(s_job_done, portMAX_DELAY);
+    return s_job.result;
+}
+
+static esp_err_t send_ws(const ws_target_t *target, httpd_ws_type_t type, const void *data, size_t length)
+{
+    return run_ws_job(target, false, type, data, length);
+}
+
+static esp_err_t send_hello(const ws_target_t *target)
 {
     motion_logger_stats_t stats;
     motion_logger_get_stats(&stats);
-    char json[320];
+    char json[512];
     const int length = snprintf(
         json, sizeof(json),
         "{\"type\":\"hello\",\"protocol\":%d,\"firmware\":\"paw3395-wifi-monitor\","
@@ -219,11 +295,11 @@ static esp_err_t send_hello(int fd)
         "\"ring_samples\":%" PRIu32 ",\"synthetic\":%s,\"next_seq\":%" PRIu32 ",\"ssid\":\"%s\"}",
         MOTION_PROTOCOL_VERSION, s_boot_id, s_config.sample_period_ms * 1000U,
         s_config.samples_per_packet, stats.ring_samples, s_config.synthetic ? "true" : "false",
-        stats.next_sequence, motion_wifi_ssid());
+        stats.next_sequence, s_ssid_json);
     if (length < 0 || length >= (int)sizeof(json)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    return send_ws(fd, HTTPD_WS_TYPE_TEXT, json, (size_t)length);
+    return send_ws(target, HTTPD_WS_TYPE_TEXT, json, (size_t)length);
 }
 
 typedef struct {
@@ -233,7 +309,7 @@ typedef struct {
     uint32_t backlog;
 } session_counters_t;
 
-static esp_err_t send_status(int fd, const session_counters_t *session)
+static esp_err_t send_status(const ws_target_t *target, const session_counters_t *session)
 {
     motion_logger_stats_t stats;
     motion_logger_get_stats(&stats);
@@ -261,13 +337,13 @@ static esp_err_t send_status(int fd, const session_counters_t *session)
     if (length < 0 || length >= (int)sizeof(json)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    return send_ws(fd, HTTPD_WS_TYPE_TEXT, json, (size_t)length);
+    return send_ws(target, HTTPD_WS_TYPE_TEXT, json, (size_t)length);
 }
 
-static void drop_client(int fd, const char *reason, esp_err_t err)
+static void drop_client(const ws_target_t *target, const char *reason, esp_err_t err)
 {
-    ESP_LOGW(TAG, "closing WebSocket fd=%d: %s (%s)", fd, reason, esp_err_to_name(err));
-    httpd_sess_trigger_close(s_server, fd);
+    ESP_LOGW(TAG, "closing WebSocket fd=%d: %s (%s)", target->fd, reason, esp_err_to_name(err));
+    run_ws_job(target, true, HTTPD_WS_TYPE_CLOSE, NULL, 0);
 }
 
 static void sender_task(void *arg)
@@ -283,7 +359,7 @@ static void sender_task(void *arg)
     TickType_t last_wake = xTaskGetTickCount();
 
     uint32_t active_generation = 0;
-    int fd = -1;
+    ws_target_t target = {.fd = -1};
     bool streaming = false;
     bool failed = false;
     uint32_t cursor = 0;
@@ -302,21 +378,21 @@ static void sender_task(void *arg)
         portEXIT_CRITICAL(&s_client_lock);
 
         if (client.fd < 0) {
-            fd = -1;
+            target.fd = -1;
             streaming = false;
             continue;
         }
-        if (client.generation != active_generation || client.fd != fd) {
+        if (client.generation != active_generation || client.fd != target.fd) {
             active_generation = client.generation;
-            fd = client.fd;
+            target = (ws_target_t){.fd = client.fd, .generation = client.generation};
             streaming = false;
             failed = false;
             packet_sequence = 0;
             session = (session_counters_t){0};
-            const esp_err_t err = send_hello(fd);
+            const esp_err_t err = send_hello(&target);
             if (err != ESP_OK) {
                 failed = true;
-                drop_client(fd, "hello failed", err);
+                drop_client(&target, "hello failed", err);
                 continue;
             }
             next_status_us = esp_timer_get_time();
@@ -344,11 +420,11 @@ static void sender_task(void *arg)
                 }
                 const size_t length = motion_protocol_encode(packet, sizeof(packet), packet_sequence,
                                                              period_us, samples, count);
-                const esp_err_t err = send_ws(fd, HTTPD_WS_TYPE_BINARY, packet, length);
+                const esp_err_t err = send_ws(&target, HTTPD_WS_TYPE_BINARY, packet, length);
                 if (err != ESP_OK) {
                     ++session.send_failures;
                     failed = true;
-                    drop_client(fd, "send failed", err);
+                    drop_client(&target, "send failed", err);
                     break;
                 }
                 ++packet_sequence;
@@ -363,13 +439,10 @@ static void sender_task(void *arg)
         const int64_t now_us = esp_timer_get_time();
         if (!failed && now_us >= next_status_us) {
             next_status_us = now_us + STATUS_INTERVAL_US;
-            const esp_err_t err = send_status(fd, &session);
+            const esp_err_t err = send_status(&target, &session);
             if (err != ESP_OK) {
                 failed = true;
-                drop_client(fd, "status failed", err);
-            } else {
-                /* The browser rarely sends on this socket; keep LRU purge from picking it. */
-                httpd_sess_update_lru_counter(s_server, fd);
+                drop_client(&target, "status failed", err);
             }
         }
     }
@@ -383,6 +456,11 @@ esp_err_t motion_webserver_start(const motion_webserver_config_t *config)
     }
     s_config = *config;
     s_boot_id = esp_random();
+    json_escape(motion_wifi_ssid(), s_ssid_json, sizeof(s_ssid_json));
+    s_job_done = xSemaphoreCreateBinary();
+    if (s_job_done == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
 
     httpd_config_t http_config = HTTPD_DEFAULT_CONFIG();
     http_config.lru_purge_enable = true;
